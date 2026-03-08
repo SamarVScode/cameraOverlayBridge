@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VerifyScan Pro</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background: #0f172a;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
+        #app-frame {
+            width: 100%;
+            height: 100vh;
+            border: none;
+            display: block;
+        }
+
+        /* ─── Top-Level Camera Overlay ────────────────────────
+       This overlay lives OUTSIDE the GAS iframe, so it can
+       call getUserMedia without sandbox restrictions.
+    ────────────────────────────────────────────────────── */
+        #camera-bridge-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.97);
+            z-index: 999999;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+        }
+
+        #camera-bridge-overlay.active {
+            display: flex;
+        }
+
+        #bridge-video {
+            width: 100%;
+            max-width: 520px;
+            border-radius: 12px;
+            border: 2px solid #2563eb;
+            background: #000;
+        }
+
+        .bridge-controls {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .bridge-btn {
+            padding: 14px 32px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: transform 0.1s, opacity 0.2s;
+        }
+
+        .bridge-btn:active {
+            transform: scale(0.97);
+        }
+
+        #btn-bridge-snap {
+            background: #2563eb;
+            color: white;
+            font-size: 1.1rem;
+        }
+
+        #btn-bridge-snap:hover {
+            background: #1d4ed8;
+        }
+
+        #btn-bridge-cancel {
+            background: rgba(255, 255, 255, 0.1);
+            color: #94a3b8;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
+        #btn-bridge-cancel:hover {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+        }
+
+        .bridge-label {
+            color: #94a3b8;
+            font-size: 0.85rem;
+            text-align: center;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        #bridge-error {
+            color: #ef4444;
+            font-size: 0.9rem;
+            text-align: center;
+            padding: 12px 24px;
+            background: rgba(239, 68, 68, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            max-width: 400px;
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+    <!--
+    ┌──────────────────────────────────────────────────────────┐
+    │  IMPORTANT: Replace the src below with your deployed     │
+    │  Google Apps Script Web App URL.                         │
+    │                                                          │
+    │  Example:                                                │
+    │  https://script.google.com/macros/s/AKfy.../exec         │
+    └──────────────────────────────────────────────────────────┘
+  -->
+    <iframe id="app-frame" src="YOUR_GAS_WEB_APP_URL_HERE" allow="camera; microphone" allowfullscreen></iframe>
+
+    <!-- ─── Camera Bridge Overlay (Top-Level Window) ─── -->
+    <div id="camera-bridge-overlay">
+        <div class="bridge-label">📷 Camera — VerifyScan Pro</div>
+        <video id="bridge-video" autoplay playsinline muted></video>
+        <div id="bridge-error"></div>
+        <div class="bridge-controls">
+            <button id="btn-bridge-snap" class="bridge-btn">📸 Capture</button>
+            <button id="btn-bridge-cancel" class="bridge-btn">✕ Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════════════
+        // TOP-WINDOW CAMERA BRIDGE
+        //
+        // Architecture:
+        //   GAS iframe     →  postMessage(OPEN_CAMERA)   →  this script
+        //   this script   →  getUserMedia + overlay      →  user captures
+        //   this script   →  postMessage(CAMERA_RESULT)  →  GAS iframe
+        // ═══════════════════════════════════════════════════════
+
+        var overlay = document.getElementById('camera-bridge-overlay');
+        var video = document.getElementById('bridge-video');
+        var btnSnap = document.getElementById('btn-bridge-snap');
+        var btnCancel = document.getElementById('btn-bridge-cancel');
+        var errorBox = document.getElementById('bridge-error');
+        var gasFrame = document.getElementById('app-frame');
+
+        var activeStream = null;
+        var activeTarget = null;
+        var gasWindow = null; // Reference back to the iframe's contentWindow
+
+        // ── Listen for messages from the GAS iframe ──────────
+        window.addEventListener('message', function (event) {
+            var data = event.data;
+            if (!data || typeof data.type !== 'string') return;
+
+            if (data.type === 'OPEN_CAMERA') {
+                activeTarget = data.target || null;
+                gasWindow = event.source; // Save reference for reply
+                openCameraBridge();
+            }
+
+            if (data.type === 'CLOSE_CAMERA') {
+                closeCameraBridge();
+            }
+        });
+
+        // ── Open the camera overlay ───────────────────────────
+        function openCameraBridge() {
+            errorBox.style.display = 'none';
+            overlay.classList.add('active');
+
+            navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }
+            }).then(function (stream) {
+                activeStream = stream;
+                video.srcObject = stream;
+            }).catch(function (err) {
+                var msg = err.name === 'NotAllowedError'
+                    ? 'Camera access denied. Please allow camera permission and try again.'
+                    : 'Could not open camera: ' + err.message;
+                showError(msg);
+            });
+        }
+
+        // ── Capture photo ─────────────────────────────────────
+        btnSnap.addEventListener('click', function () {
+            if (!activeStream) return;
+
+            var canvas = document.createElement('canvas');
+            var maxDim = 1280;
+            var w = video.videoWidth;
+            var h = video.videoHeight;
+
+            // Downscale if needed
+            if (w > h) {
+                if (w > maxDim) { h = Math.round(h * maxDim / w); w = maxDim; }
+            } else {
+                if (h > maxDim) { w = Math.round(w * maxDim / h); h = maxDim; }
+            }
+
+            canvas.width = w;
+            canvas.height = h;
+            canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+            var dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+
+            // Send image back to GAS iframe
+            var targetWindow = gasWindow || gasFrame.contentWindow;
+            targetWindow.postMessage({
+                type: 'CAMERA_RESULT',
+                image: dataUrl,
+                target: activeTarget
+            }, '*');
+
+            closeCameraBridge();
+        });
+
+        // ── Cancel button ─────────────────────────────────────
+        btnCancel.addEventListener('click', function () {
+            // Notify GAS iframe to cancel its waiting state
+            var targetWindow = gasWindow || gasFrame.contentWindow;
+            if (targetWindow) {
+                targetWindow.postMessage({ type: 'CLOSE_CAMERA' }, '*');
+            }
+            closeCameraBridge();
+        });
+
+        // ── Close / cleanup ───────────────────────────────────
+        function closeCameraBridge() {
+            if (activeStream) {
+                activeStream.getTracks().forEach(function (t) { t.stop(); });
+                activeStream = null;
+            }
+            video.srcObject = null;
+            overlay.classList.remove('active');
+            activeTarget = null;
+            gasWindow = null;
+        }
+
+        // ── Show error inside overlay ─────────────────────────
+        function showError(msg) {
+            errorBox.textContent = msg;
+            errorBox.style.display = 'block';
+        }
+    </script>
+
+</body>
+
+</html>
