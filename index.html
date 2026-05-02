@@ -131,7 +131,7 @@
     │  https://script.google.com/macros/s/AKfy.../exec         │
     └──────────────────────────────────────────────────────────┘
   -->
-    <iframe id="app-frame" src="https://script.google.com/a/macros/myntra.com/s/AKfycbygG5nIZyKQ0zlVYhe5NZbG4up-5mfH1dmoOnJU4Fk9X8_Jgm-dxv5UGTiLzy6V2MVd4Q/exec" allow="camera; microphone" allowfullscreen></iframe>
+    <iframe id="app-frame" src="https://script.google.com/a/macros/myntra.com/s/AKfycbyueUve-eSrqOvG-gFJdqf3E5E6QtEt-_wj4Oqbx0bv6ezF5mDb3xIOmVEbm_IfP-affw/exec" allow="camera; microphone" allowfullscreen></iframe>
 
     <!-- ─── Camera Bridge Overlay (Top-Level Window) ─── -->
     <div id="camera-bridge-overlay">
@@ -161,72 +161,97 @@
         var errorBox = document.getElementById('bridge-error');
         var gasFrame = document.getElementById('app-frame');
 
-        // ── Open camera & show overlay ──────────────────────
-        function openCamera(target) {
-            errorBox.style.display = 'none';
-            overlay.classList.add('active');
+        var activeStream = null;
+        var activeTarget = null;
+        var gasWindow = null; // Reference back to the iframe's contentWindow
 
-            var constraints = {
-                video: {
-                    facingMode: { ideal: "environment" },
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 }
-                }
-            };
-
-            navigator.mediaDevices.getUserMedia(constraints)
-                .then(function (stream) {
-                    video.srcObject = stream;
-                    // Store target (e.g. "intact") to send back with result
-                    overlay.dataset.activeTarget = target;
-                })
-                .catch(function (err) {
-                    console.error("Camera Error:", err);
-                    showError("Could not access camera: " + err.message);
-                });
-        }
-
-        // ── Close camera & overlay ──────────────────────────
-        function closeCamera() {
-            if (video.srcObject) {
-                video.srcObject.getTracks().forEach(function (track) { track.stop(); });
-            }
-            video.srcObject = null;
-            overlay.classList.remove('active');
-        }
-
-        // ── Snap photo ──────────────────────────────────────
-        function takePhoto() {
-            var canvas = document.createElement('canvas');
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            var ctx = canvas.getContext('2d');
-            ctx.drawImage(video, 0, 0);
-
-            var dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-            var target = overlay.dataset.activeTarget;
-
-            // Send image back to GAS iframe
-            gasFrame.contentWindow.postMessage({
-                type: 'CAMERA_RESULT',
-                image: dataUrl,
-                target: target
-            }, '*');
-
-            closeCamera();
-        }
-
-        // ── Event Listeners ─────────────────────────────────
+        // ── Listen for messages from the GAS iframe ──────────
         window.addEventListener('message', function (event) {
-            if (event.data.type === 'OPEN_CAMERA') {
-                openCamera(event.data.target);
-            } else if (event.data.type === 'CLOSE_CAMERA') {
-                closeCamera();
+            var data = event.data;
+            if (!data || typeof data.type !== 'string') return;
+
+            if (data.type === 'OPEN_CAMERA') {
+                activeTarget = data.target || null;
+                gasWindow = event.source; // Save reference for reply
+                openCameraBridge();
+            }
+
+            if (data.type === 'CLOSE_CAMERA') {
+                closeCameraBridge();
             }
         });
 
-        btnSnap.addEventListener('click', takePhoto);
-        btnCancel.addEventListener('click', closeCamera);
+        // ── Open the camera overlay ───────────────────────────
+        function openCameraBridge() {
+            errorBox.style.display = 'none';
+            overlay.classList.add('active');
+
+            navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 1280 } }
+            }).then(function (stream) {
+                activeStream = stream;
+                video.srcObject = stream;
+            }).catch(function (err) {
+                var msg = err.name === 'NotAllowedError'
+                    ? 'Camera access denied. Please allow camera permission and try again.'
+                    : 'Could not open camera: ' + err.message;
+                showError(msg);
+            });
+        }
+
+        // ── Capture photo ─────────────────────────────────────
+        btnSnap.addEventListener('click', function () {
+            if (!activeStream) return;
+
+            var canvas = document.createElement('canvas');
+            var maxDim = 1280;
+            var w = video.videoWidth;
+            var h = video.videoHeight;
+
+            // Downscale if needed
+            if (w > h) {
+                if (w > maxDim) { h = Math.round(h * maxDim / w); w = maxDim; }
+            } else {
+                if (h > maxDim) { w = Math.round(w * maxDim / h); h = maxDim; }
+            }
+
+            canvas.width = w;
+            canvas.height = h;
+            canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+            var dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+
+            // Send image back to GAS iframe
+            var targetWindow = gasWindow || gasFrame.contentWindow;
+            targetWindow.postMessage({
+                type: 'CAMERA_RESULT',
+                image: dataUrl,
+                target: activeTarget
+            }, '*');
+
+            closeCameraBridge();
+        });
+
+        // ── Cancel button ─────────────────────────────────────
+        btnCancel.addEventListener('click', function () {
+            // Notify GAS iframe to cancel its waiting state
+            var targetWindow = gasWindow || gasFrame.contentWindow;
+            if (targetWindow) {
+                targetWindow.postMessage({ type: 'CLOSE_CAMERA' }, '*');
+            }
+            closeCameraBridge();
+        });
+
+        // ── Close / cleanup ───────────────────────────────────
+        function closeCameraBridge() {
+            if (activeStream) {
+                activeStream.getTracks().forEach(function (t) { t.stop(); });
+                activeStream = null;
+            }
+            video.srcObject = null;
+            overlay.classList.remove('active');
+            activeTarget = null;
+            gasWindow = null;
+        }
 
         // ── Show error inside overlay ─────────────────────────
         function showError(msg) {
